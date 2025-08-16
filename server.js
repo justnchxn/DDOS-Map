@@ -1,4 +1,3 @@
-// server.js (ESM)
 import 'dotenv/config';
 import express from "express";
 import cors from "cors";
@@ -6,8 +5,7 @@ import cors from "cors";
 const app = express();
 app.use(cors());
 
-let cachedData = []; // [{ src_country, intensity_index, attack_type }]
-
+let cachedData = []; 
 async function fetchCloudflareData() {
   try {
     const token = process.env.CLOUDFLARE_API_TOKEN;
@@ -31,11 +29,11 @@ async function fetchCloudflareData() {
     }
 
     const data = await res.json();
-    const list = data?.result?.top_0 ?? []; // <-- matches your curl output
+    const list = data?.result?.top_0 ?? []; 
 
     cachedData = list.map(row => ({
       src_country: row?.originCountryAlpha2 || "??",
-      intensity_index: Number(row?.value ?? 1), // percentage-like number
+      intensity_index: Number(row?.value ?? 1), 
       attack_type: "Layer 3/4",
       dst_country: "GLOBAL"
     }));
@@ -44,15 +42,11 @@ async function fetchCloudflareData() {
     console.log(`Fetched ${cachedData.length} countries from Radar (lastUpdated: ${updated})`);
   } catch (err) {
     console.error("Error fetching Cloudflare data:", err);
-    // keep old cache if any
   }
 }
 
-// pull once, then every 5 minutes
 await fetchCloudflareData();
 setInterval(fetchCloudflareData, 5 * 60 * 1000);
-
-// SSE stream
 app.get("/stream", (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
