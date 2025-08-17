@@ -265,9 +265,12 @@ function updateInfographic() {
 
 // Decide endpoints based on where we are
 const isLocal = location.hostname === "localhost" || location.hostname === "127.0.0.1";
-const candidates = isLocal
-  ? ["http://localhost:3000/events", "http://localhost:3000/stream"]
-  : ["/api/events"];
+const candidates = [
+  "/api/events",          
+  "http://localhost:3000/api/events",
+  "http://localhost:3000/events",    
+  "http://localhost:3000/stream"   
+];
 
 // Singleton across hot reloads (harmless on Vercel)
 let es = globalThis.__ddos_es;
@@ -281,17 +284,19 @@ async function connectSSE() {
 
   for (const url of candidates) {
     try {
-      // Try to open the stream
-      const test = new EventSource(url, { withCredentials: false });
+      // Instead of hardcoding http://localhost:3000/api/events
+      const es = new EventSource("/api/events");
 
-      // Wait until it actually opens (4s timeout)
-      await new Promise((resolve, reject) => {
-        const t = setTimeout(() => reject(new Error("open timeout")), 4000);
-        test.onopen = () => { clearTimeout(t); resolve(); };
-        test.onerror = () => { /* let timeout fire */ };
-      });
+      es.onopen = () => {
+        console.log("✅ SSE connected");
+        const statusEl = document.getElementById("status");
+        if (statusEl) statusEl.textContent = "Live data connected";
+      };
 
-      // Success: keep this connection
+      es.onerror = (err) => {
+        console.error("❌ SSE error:", err);
+      };
+
       es = test;
       globalThis.__ddos_es = es;
 
