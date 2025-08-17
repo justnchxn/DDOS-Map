@@ -261,33 +261,41 @@ function updateInfographic() {
   elLastTick.textContent = new Date().toLocaleTimeString();
 }
 
-/* ===================== Robust SSE Connector ===================== */
+/* ===================== Robust SSE Connector (local + Vercel) ===================== */
+
+// Decide endpoints based on where we are
 const isLocal = location.hostname === "localhost" || location.hostname === "127.0.0.1";
 const candidates = isLocal
   ? ["http://localhost:3000/events", "http://localhost:3000/stream"]
   : ["/api/events"];
 
+// Singleton across hot reloads (harmless on Vercel)
 let es = globalThis.__ddos_es;
 
 async function connectSSE() {
-  if (es && es.readyState !== 2) {
+  // Close any previous instance
+  if (es && es.readyState !== 2 /* CLOSED */) {
     try { es.close(); } catch {}
   }
   es = null;
 
   for (const url of candidates) {
     try {
+      // Try to open the stream
       const test = new EventSource(url, { withCredentials: false });
 
+      // Wait until it actually opens (4s timeout)
       await new Promise((resolve, reject) => {
         const t = setTimeout(() => reject(new Error("open timeout")), 4000);
         test.onopen = () => { clearTimeout(t); resolve(); };
-        test.onerror = () => { /* let timeout handle it */ };
+        test.onerror = () => { /* let timeout fire */ };
       });
 
+      // Success: keep this connection
       es = test;
       globalThis.__ddos_es = es;
 
+      // ---- handlers ----
       es.onopen = () => {
         console.log("SSE open:", url);
         const statusEl = document.getElementById("status");
@@ -298,6 +306,7 @@ async function connectSSE() {
         try {
           const evt = JSON.parse(e.data);
 
+          // ---- arcs ----
           const src = getCentroid(evt.src_country) || [Math.random()*360-180, Math.random()*180-90];
           arcs.push({
             src,
@@ -307,6 +316,7 @@ async function connectSSE() {
           });
           if (arcs.length > MAX_ARCS) arcs.splice(0, arcs.length - MAX_ARCS);
 
+          // ---- infographic window ----
           const now = Date.now();
           windowEvents.push({
             ts: now,
@@ -322,22 +332,24 @@ async function connectSSE() {
 
       es.onerror = (e) => {
         console.warn("SSE error on", url, e);
-        const statusEl2 = document.getElementById("status");
-        if (statusEl2) statusEl2.textContent = "Reconnecting…";
+        const statusEl = document.getElementById("status");
+        if (statusEl) statusEl.textContent = "Reconnecting…";
         setTimeout(connectSSE, 2000);
       };
 
-      return;
+      return; // stop after the first working URL
     } catch (err) {
       console.warn("SSE connect failed for", url, err.message);
     }
   }
 
+  // All candidates failed; show status & retry
   const statusEl = document.getElementById("status");
   if (statusEl) statusEl.textContent = "Unable to connect (retrying)…";
   setTimeout(connectSSE, 3000);
 }
 
+// HMR cleanup (no effect on Vercel)
 if (import.meta.hot) {
   import.meta.hot.accept();
   import.meta.hot.dispose(() => {
@@ -346,4 +358,5 @@ if (import.meta.hot) {
   });
 }
 
+// Kick it off
 connectSSE();
