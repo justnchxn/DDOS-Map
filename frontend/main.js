@@ -288,9 +288,11 @@ async function connectSSE() {
       es = test;
       globalThis.__ddos_es = es;
 
-      console.log("SSE open:", url);
-      const statusEl = document.getElementById("status");
-      if (statusEl) statusEl.textContent = "Live data connected";
+      es.onopen = () => {
+        console.log("SSE open:", url);
+        const statusEl = document.getElementById("status");
+        if (statusEl) statusEl.textContent = "Live data connected";
+      };
 
       es.onmessage = (e) => {
         try {
