@@ -1,12 +1,14 @@
 import {Deck, _GlobeView as GlobeView, AmbientLight, PointLight, LightingEffect} from "@deck.gl/core";
 import {ArcLayer, BitmapLayer, GeoJsonLayer} from "@deck.gl/layers";
 
-const STREAM_URL = "http://localhost:3000/stream";
+/* ===================== Config ===================== */
 const GLOBAL_POINT = [0, 0];
-const MAX_ARCS = 150;       
-const ARC_FADE_SPEED = 0.05;
-const WINDOW_MS = 5 * 60 * 1000;
+const MAX_ARCS = 150;              
+const ARC_FADE_SPEED = 0.05;        
+const WINDOW_MS = 5 * 60 * 1000;   
+const PAN_SENSITIVITY = 0.10;      
 
+/* ===================== Data Loads ===================== */
 let CENTROIDS = {};
 let COUNTRIES = null;
 
@@ -20,11 +22,13 @@ async function loadCountries() {
 }
 await Promise.all([loadCentroids(), loadCountries()]);
 
+/* ===================== Lighting ===================== */
 const lighting = new LightingEffect({
   ambient: new AmbientLight({intensity: 1}),
   keyLight: new PointLight({position: [0,0,8e6], intensity: 1})
 });
 
+/* ===================== View / Interaction ===================== */
 let currentViewState = {
   latitude: 20, longitude: -20, zoom: 0.6, minZoom: -0.2, maxZoom: 2.0,
   rotationX: 0, rotationOrbit: 0
@@ -32,16 +36,14 @@ let currentViewState = {
 let isInteracting = false;
 let draggingNow = false;
 
-const PAN_SENSITIVITY = 0.1; 
-
 const deck = new Deck({
   canvas: "deck-canvas",
   views: [new GlobeView()],
   controller: {
     dragRotate: false,
-    dragPan: true,                 
-    scrollZoom: { speed: 0.03, smooth: true },   
-    zoomToPointer: false,         
+    dragPan: true,
+    scrollZoom: { speed: 0.03, smooth: true }, 
+    zoomToPointer: false,      
     doubleClickZoom: false,
     touchZoom: false,
     touchRotate: true,
@@ -56,11 +58,9 @@ const deck = new Deck({
   getCursor: () => "grab"
 });
 
-
 deck.setProps({
   onViewStateChange: ({ viewState, interactionState }) => {
     const prev = currentViewState;
-
     if (interactionState?.isZooming) {
       const locked = {
         ...viewState,
@@ -79,7 +79,7 @@ deck.setProps({
         latitude:      prev.latitude      + (viewState.latitude      - prev.latitude)      * PAN_SENSITIVITY,
         longitude:     prev.longitude     + (viewState.longitude     - prev.longitude)     * PAN_SENSITIVITY,
         rotationOrbit: prev.rotationOrbit + (viewState.rotationOrbit - prev.rotationOrbit) * PAN_SENSITIVITY,
-        zoom:          prev.zoom 
+        zoom:          prev.zoom
       };
       currentViewState = slowed;
       deck.setProps({ viewState: slowed });
@@ -98,20 +98,12 @@ deck.setProps({
 
 const canvasEl = deck.canvas || document.getElementById("deck-canvas");
 if (canvasEl) {
-  canvasEl.addEventListener(
-    "wheel",
-    (e) => {
-      if (draggingNow) {
-        e.preventDefault();
-        e.stopPropagation();
-      }
-    },
-    { passive: false }
-  );
+  canvasEl.addEventListener("wheel", (e) => {
+    if (draggingNow) { e.preventDefault(); e.stopPropagation(); }
+  }, { passive: false });
 }
 
-
-
+/* ===================== Base Layers ===================== */
 const earthLayer = new BitmapLayer({
   id: "earth",
   image: "/earth.jpg",
@@ -137,11 +129,12 @@ function countriesLayer() {
     pickable: false
   });
 }
+
+/* ===================== Live Arcs ===================== */
 const COLORS = [[120,180,255],[255,120,160],[120,255,200],[255,190,120],[190,140,255]];
 let colorIdx = 0; const nextColor = () => COLORS[(colorIdx++) % COLORS.length];
-
-let arcs = []; 
-let windowEvents = []; 
+let arcs = []; // {src:[lon,lat], age:0..1, width, color:[r,g,b]}
+let lastFrameTime = performance.now();
 
 function getCentroid(code) {
   if (!code) return null;
@@ -153,44 +146,10 @@ function widthFromIntensity(x) {
   return Math.max(0.6, Math.min(4, Math.sqrt(n)));
 }
 
-function pruneWindow(now = Date.now()) {
-  const cutoff = now - WINDOW_MS;
-  let idx = 0;
-  while (idx < windowEvents.length && windowEvents[idx].ts < cutoff) idx++;
-  if (idx > 0) windowEvents.splice(0, idx);
-}
-
-const es = new EventSource(STREAM_URL);
-es.onopen = () => (statusEl.textContent = "Live data connected");
-es.onerror = () => (statusEl.textContent = "Connection issue… (using cache)");
-es.onmessage = (e) => {
-  const evt = JSON.parse(e.data);
-  const now = Date.now();
-
-  const src = getCentroid(evt.src_country) || [Math.random()*360-180, Math.random()*180-90];
-  arcs.push({ src, age: 0, width: widthFromIntensity(evt.intensity_index), color: nextColor() });
-  if (arcs.length > MAX_ARCS) arcs.splice(0, arcs.length - MAX_ARCS);
-
-  windowEvents.push({ ts: now, country: (evt.src_country || "??").toUpperCase(), intensity: Number(evt.intensity_index || 1) });
-  pruneWindow(now);
-
-  scheduleFrame();
-  scheduleInfographic();
-};
-
-let rafId = null;
-let lastTime = performance.now();
-
-function scheduleFrame() {
-  if (rafId) return;
-  rafId = requestAnimationFrame(frame);
-}
-
-function frame(now) {
-  rafId = null;
-
-  const dt = Math.min(100, now - lastTime);
-  lastTime = now;
+function updateLayers() {
+  const now = performance.now();
+  const dt = Math.min(100, now - lastFrameTime);
+  lastFrameTime = now;
   const fade = ARC_FADE_SPEED * (dt / 16.67);
   for (const a of arcs) a.age = Math.min(1, a.age + fade);
 
@@ -219,44 +178,58 @@ function frame(now) {
       })
     ].filter(Boolean)
   });
-
-  if (!isInteracting) {
-    currentViewState = {...currentViewState, rotationOrbit: (currentViewState.rotationOrbit + 0.05) % 360};
-    deck.setProps({viewState: currentViewState});
-  }
-
-  if (arcs.length) scheduleFrame();
 }
 
-scheduleFrame();
+function animate() {
+  if (!isInteracting) {
+    currentViewState = {
+      ...currentViewState,
+      rotationOrbit: (currentViewState.rotationOrbit + 0.05) % 360
+    };
+    deck.setProps({ viewState: currentViewState });
+  }
+  updateLayers();
+  requestAnimationFrame(animate);
+}
+updateLayers();
+animate();
 
+/* ===================== Infographic ===================== */
 const elEpm = document.getElementById("kpi-epm");
 const elIntensity = document.getElementById("kpi-intensity");
 const elTop = document.getElementById("top");
 const elLastTick = document.getElementById("lastTick");
+
+let windowEvents = [];
+function pruneWindow(now = Date.now()) {
+  const cutoff = now - WINDOW_MS;
+  let i = 0;
+  while (i < windowEvents.length && windowEvents[i].ts < cutoff) i++;
+  if (i > 0) windowEvents.splice(0, i);
+}
 
 let infoTimer = null;
 function scheduleInfographic() {
   if (infoTimer) return;
   infoTimer = setTimeout(updateInfographic, 500);
 }
-
 function updateInfographic() {
   infoTimer = null;
+  if (!elEpm || !elIntensity || !elTop || !elLastTick) return;
+
   const now = Date.now();
   pruneWindow(now);
 
-  const oneMin = now - 60 * 1000;
-  const epm = windowEvents.filter(e => e.ts >= oneMin).length;
-  elEpm.textContent = epm.toString();
+  const epm = windowEvents.filter(e => e.ts >= now - 60_000).length;
+  elEpm.textContent = String(epm);
 
-  const totalIntensity = windowEvents.reduce((acc, e) => acc + e.intensity, 0);
-  elIntensity.textContent = Math.round(totalIntensity).toLocaleString();
+  const total = windowEvents.reduce((a, e) => a + e.intensity, 0);
+  elIntensity.textContent = Math.round(total).toLocaleString();
+
   const byCountry = new Map();
   for (const e of windowEvents) byCountry.set(e.country, (byCountry.get(e.country) || 0) + e.intensity);
-  const top = Array.from(byCountry.entries())
-    .sort((a,b) => b[1] - a[1])
-    .slice(0, 6);
+  const top = Array.from(byCountry.entries()).sort((a,b)=>b[1]-a[1]).slice(0,6);
+
   elTop.innerHTML = "";
   const maxVal = top[0]?.[1] || 1;
   for (const [iso2, val] of top) {
@@ -287,3 +260,88 @@ function updateInfographic() {
 
   elLastTick.textContent = new Date().toLocaleTimeString();
 }
+
+/* ===================== Robust SSE Connector ===================== */
+const isLocal = location.hostname === "localhost" || location.hostname === "127.0.0.1";
+const candidates = isLocal
+  ? ["http://localhost:3000/events", "http://localhost:3000/stream"]
+  : ["/api/events"];
+
+let es = globalThis.__ddos_es;
+
+async function connectSSE() {
+  if (es && es.readyState !== 2) {
+    try { es.close(); } catch {}
+  }
+  es = null;
+
+  for (const url of candidates) {
+    try {
+      const test = new EventSource(url, { withCredentials: false });
+
+      await new Promise((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error("open timeout")), 4000);
+        test.onopen = () => { clearTimeout(t); resolve(); };
+        test.onerror = () => { /* let timeout handle it */ };
+      });
+
+      es = test;
+      globalThis.__ddos_es = es;
+
+      console.log("SSE open:", url);
+      const statusEl = document.getElementById("status");
+      if (statusEl) statusEl.textContent = "Live data connected";
+
+      es.onmessage = (e) => {
+        try {
+          const evt = JSON.parse(e.data);
+
+          const src = getCentroid(evt.src_country) || [Math.random()*360-180, Math.random()*180-90];
+          arcs.push({
+            src,
+            age: 0,
+            width: widthFromIntensity(evt.intensity_index),
+            color: nextColor()
+          });
+          if (arcs.length > MAX_ARCS) arcs.splice(0, arcs.length - MAX_ARCS);
+
+          const now = Date.now();
+          windowEvents.push({
+            ts: now,
+            country: (evt.src_country || "??").toUpperCase(),
+            intensity: Number(evt.intensity_index || 1)
+          });
+          pruneWindow(now);
+          scheduleInfographic();
+        } catch (err) {
+          console.warn("Bad SSE payload", e.data);
+        }
+      };
+
+      es.onerror = (e) => {
+        console.warn("SSE error on", url, e);
+        const statusEl2 = document.getElementById("status");
+        if (statusEl2) statusEl2.textContent = "Reconnecting…";
+        setTimeout(connectSSE, 2000);
+      };
+
+      return;
+    } catch (err) {
+      console.warn("SSE connect failed for", url, err.message);
+    }
+  }
+
+  const statusEl = document.getElementById("status");
+  if (statusEl) statusEl.textContent = "Unable to connect (retrying)…";
+  setTimeout(connectSSE, 3000);
+}
+
+if (import.meta.hot) {
+  import.meta.hot.accept();
+  import.meta.hot.dispose(() => {
+    try { es?.close(); } catch {}
+    delete globalThis.__ddos_es;
+  });
+}
+
+connectSSE();
