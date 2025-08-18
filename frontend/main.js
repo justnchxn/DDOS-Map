@@ -1,5 +1,6 @@
 import {Deck, _GlobeView as GlobeView, AmbientLight, PointLight, LightingEffect} from "@deck.gl/core";
-import {ArcLayer, BitmapLayer, GeoJsonLayer} from "@deck.gl/layers";
+import {BitmapLayer, GeoJsonLayer, PathLayer, ScatterplotLayer} from "@deck.gl/layers";
+
 
 /* ===================== Static data ===================== */
 
@@ -35,7 +36,7 @@ let currentViewState = {
   rotationOrbit: 0
 };
 
-const PAN_SENSITIVITY = 0.1;  // dampen drag motion
+const PAN_SENSITIVITY = 0.1; 
 let isInteracting = false;
 let draggingNow = false;
 
@@ -47,7 +48,7 @@ const deck = new Deck({
   controller: {
     dragRotate: false,        
     dragPan: true,
-    scrollZoom: { speed: 0.03 },   
+    scrollZoom: { speed: 0.03, smooth: true },   
     zoomToPointer: false,
     doubleClickZoom: false,
     touchZoom: false,
@@ -63,12 +64,10 @@ const deck = new Deck({
   getCursor: () => "grab"
 });
 
-// Tame drag & keep position during zoom gesture
 deck.setProps({
   onViewStateChange: ({viewState, interactionState}) => {
     const prev = currentViewState;
 
-    // Lock lat/lon/orbit while zooming (wheel)
     if (interactionState?.isZooming) {
       const locked = {
         ...viewState,
@@ -81,7 +80,6 @@ deck.setProps({
       return;
     }
 
-    // Dampen drag movement
     if (interactionState?.isDragging) {
       const slowed = {
         ...viewState,
@@ -105,7 +103,6 @@ deck.setProps({
   }
 });
 
-// Prevent wheel + drag conflict
 const canvasEl = deck.canvas || document.getElementById("deck-canvas");
 if (canvasEl) {
   canvasEl.addEventListener(
@@ -135,6 +132,54 @@ const nextColor = () => COLORS[(colorIdx++) % COLORS.length];
 const MAX_ARCS = 150;
 let arcs = [];
 
+const MAX_ALT_KM = 700;                 
+const ALT_METERS = MAX_ALT_KM * 1000;
+const MAX_ALT_KM_BASE = 500;
+const MAX_ALT_KM_PER_INTENSITY = 80; // km per intensity index
+function arcAltitude(t, maxAltMeters = ALT_METERS) {
+  const clamped = Math.max(0, Math.min(1, t));
+  const s = Math.sin(Math.PI * clamped);
+  return maxAltMeters * Math.pow(s, 1.2);
+}
+
+
+const TRAVEL_MS = 1200;  
+const FADE_MS   = 2000;  
+
+const easeOutCubic = t => 1 - Math.pow(1 - t, 3);
+
+function gcInterpolate([lng1, lat1], [lng2, lat2], t) {
+  const toRad = d => (d * Math.PI) / 180;
+  const toDeg = r => (r * 180) / Math.PI;
+  const φ1 = toRad(lat1), λ1 = toRad(lng1);
+  const φ2 = toRad(lat2), λ2 = toRad(lng2);
+
+  const v = (φ, λ) => [Math.cos(φ)*Math.cos(λ), Math.cos(φ)*Math.sin(λ), Math.sin(φ)];
+  const A = v(φ1, λ1), B = v(φ2, λ2);
+  const dot = Math.max(-1, Math.min(1, A[0]*B[0] + A[1]*B[1] + A[2]*B[2]));
+  const ω = Math.acos(dot) || 1e-12, sinω = Math.sin(ω);
+  const k1 = Math.sin((1 - t) * ω) / sinω, k2 = Math.sin(t * ω) / sinω;
+
+  const x = k1*A[0] + k2*B[0], y = k1*A[1] + k2*B[1], z = k1*A[2] + k2*B[2];
+  const φ = Math.atan2(z, Math.hypot(x, y)), λ = Math.atan2(y, x);
+  return [toDeg(λ), toDeg(φ)];
+}
+
+function gcPoints(src, dst, t, segments = 32, maxAltMeters = ALT_METERS) {
+  const out = [];
+  const end = Math.max(0.02, Math.min(1, t));
+  const steps = Math.max(1, Math.round(segments * end));
+  for (let i = 0; i <= steps; i++) {
+    const f = i / segments;
+    const pos = gcInterpolate(src, dst, f);
+    out.push([pos[0], pos[1], arcAltitude(f, maxAltMeters)]);
+  }
+  return out;
+}
+
+
+
+
 function getCentroid(code) {
   if (!code) return null;
   const c = CENTROIDS[code.toUpperCase()];
@@ -143,7 +188,7 @@ function getCentroid(code) {
 
 function widthFromIntensity(x) {
   const n = Number(x) || 1;
-  return Math.max(0.6, Math.min(4, Math.sqrt(n)));
+  return 2 * Math.max(0.6, Math.min(4, Math.sqrt(n)));
 }
 
 function buildEarthLayer() {
@@ -178,33 +223,51 @@ function buildCountriesLayer() {
   });
 }
 
-function buildArcLayer() {
-  return new ArcLayer({
-    id: "attack-arcs",
-    data: arcs.slice(),
-    getSourcePosition: d => d.sourcePosition,
-    getTargetPosition: d => d.targetPosition,
+function buildTrailLayer() {
+  return new PathLayer({
+    id: "attack-trails",
+    data: arcs.slice(),                        
+    getPath: d => gcPoints(d.sourcePosition, d.finalTarget, d.progress, 48, d.maxAltMeters),
     getWidth: d => d.width,
-    getSourceColor: d => {
-      const alpha = 255 * Math.max(0, 1 - d.age / 2000); 
-      return [d.color[0], d.color[1], d.color[2], alpha];
+    widthUnits: "pixels",
+    getColor: d => {
+      const a = Math.round((d.alpha ?? 1) * 200); 
+      return [d.color[0], d.color[1], d.color[2], a];
     },
-    getTargetColor: d => {
-      const alpha = 255 * Math.max(0, 1 - d.age / 2000);
-      return [d.color[0], d.color[1], d.color[2], alpha];
-    },
-    greatCircle: true,
     pickable: false,
     parameters: { depthTest: true, blend: true }
   });
 }
+
+function buildHeadLayer() {
+  return new ScatterplotLayer({
+    id: "attack-heads",
+    data: arcs.slice(),
+    getPosition: d => {
+      const p = Math.max(0.02, d.progress);
+      const pos = gcInterpolate(d.sourcePosition, d.finalTarget, p);
+      return [pos[0], pos[1], arcAltitude(p, d.maxAltMeters)];
+    },
+    getRadius: d => 40000 + d.width * 12000,       
+    radiusUnits: "meters",
+    getFillColor: d => {
+      const a = Math.round((d.alpha ?? 1) * 255);  
+      return [d.color[0], d.color[1], d.color[2], a];
+    },
+    stroked: false,
+    pickable: false,
+    parameters: { depthTest: true, blend: true }
+  });
+}
+
 
 function buildLayers() {
   const out = [];
   out.push(buildEarthLayer());
   const countries = buildCountriesLayer();
   if (countries) out.push(countries);
-  out.push(buildArcLayer());
+  out.push(buildTrailLayer());
+  out.push(buildHeadLayer());
   return out;
 }
 
@@ -213,18 +276,24 @@ function updateLayers() {
 }
 
 function animateArcs() {
-  const now = Date.now();
-  const lifespan = 2000; 
+  const now = performance.now();
 
-  // update ages + filter out expired
-  for (const arc of arcs) {
-    if (!arc._born) arc._born = now;
-    arc.age = now - arc._born;
-  }
-
-  // keep only arcs younger than lifespan
   for (let i = arcs.length - 1; i >= 0; i--) {
-    if (arcs[i].age > lifespan) {
+    const a = arcs[i];
+    const age = now - (a._born || now);
+    const t = Math.min(1, age / TRAVEL_MS);
+    a.progress = 1 - Math.pow(1 - t, 3); 
+
+    if (a.progress >= 1) {
+      const fadeT = Math.min(1, (age - TRAVEL_MS) / FADE_MS);
+      a.alpha = 1 - fadeT;
+    } else {
+      a.alpha = 1;
+    }
+
+    a.width = Math.max(0.8, a.width * (0.996 + 0.004 * (a.alpha ?? 1)));
+
+    if (age >= TRAVEL_MS + FADE_MS) {
       arcs.splice(i, 1);
     }
   }
@@ -236,7 +305,7 @@ function animateArcs() {
 /* ===================== Infographic (live KPIs & Top sources) ===================== */
 
 const WINDOW_MS = 5 * 60 * 1000;
-let windowEvents = []; // {ts, country, intensity}
+let windowEvents = [];
 
 function pruneWindow(now = Date.now()) {
   const cutoff = now - WINDOW_MS;
@@ -248,16 +317,13 @@ function pruneWindow(now = Date.now()) {
 function renderInfographic() {
   const now = Date.now();
 
-  // EPM = events in last 60s
   const ONE_MIN = 60 * 1000;
   const epm = windowEvents.filter(e => e.ts >= now - ONE_MIN).length;
 
-  // 5-minute totals
   const total = windowEvents.length;
 
-  // Aggregate by country + intensity
   let totalIntensity = 0;
-  const byCountry = new Map(); // ISO2 -> {count, intensity}
+  const byCountry = new Map(); 
   for (const e of windowEvents) {
     totalIntensity += e.intensity;
     const rec = byCountry.get(e.country) || { count: 0, intensity: 0 };
@@ -268,14 +334,11 @@ function renderInfographic() {
   const top = [...byCountry.entries()]
     .sort((a, b) => (b[1].count - a[1].count) || (b[1].intensity - a[1].intensity))
     .slice(0, 5);
-
-  // Update KPIs
   const epmEl = document.getElementById("kpi-epm");
   if (epmEl) epmEl.textContent = String(epm);
   const intEl = document.getElementById("kpi-intensity");
   if (intEl) intEl.textContent = String(totalIntensity);
 
-  // Update Top table (no per-bar intensity line)
   const table = document.getElementById("top");
   if (table) {
     const maxCount = top.length ? top[0][1].count : 1;
@@ -294,15 +357,13 @@ function renderInfographic() {
       }).join("")) || `<tr><td class="muted">—</td><td></td><td></td></tr>`;
   }
 
-  // Status line
   const statusEl = document.getElementById("status");
   if (statusEl) {
     const last = windowEvents[windowEvents.length - 1];
     const lastStr = last ? `${last.country} • x${last.intensity}` : "—";
-    statusEl.textContent = `Live data connected — last: ${lastStr} — 5-min total: ${total}`;
+    // statusEl.textContent = `Live data connected — last: ${lastStr} — 5-min total: ${total}`;
   }
 
-  // Footer timestamp
   const lastTick = document.getElementById("lastTick");
   if (lastTick) {
     const d = new Date();
@@ -310,7 +371,6 @@ function renderInfographic() {
   }
 }
 
-// Debounced updater
 let infographicTimer = null;
 function scheduleInfographic() {
   if (infographicTimer) return;
@@ -323,7 +383,6 @@ function scheduleInfographic() {
 /* ===================== SSE: handle incoming event ===================== */
 
 function handleSSEEvent(evt) {
-  // Local, safe helpers (no external deps)
   const lookupCentroid = (code) => {
     if (!code) return null;
     const k = String(code).toUpperCase();
@@ -331,34 +390,37 @@ function handleSSEEvent(evt) {
     return Array.isArray(pt) ? pt : null;
   };
   const jitterHub = (seedStr) => {
-    // deterministic ring around (0,0) so GLOBAL arcs don’t overlap
     let h = 0;
     for (let i = 0; i < seedStr.length; i++) h = ((h << 5) - h + seedStr.charCodeAt(i)) | 0;
     h = Math.abs(h);
-    const r = 10 + (h % 100) / 100 * 12;         // 10–22°
+    const r = 10 + (h % 100) / 100 * 12;        
     const ang = ((h / 100) % 360) * (Math.PI / 180);
     return [r * Math.cos(ang), r * Math.sin(ang)];
   };
 
-  // Parse & resolve
   const ts = Number(evt.ts || Date.now());
   const srcCode = (evt.src_country || "").toUpperCase();
   const dstCode = (evt.dst_country || "GLOBAL").toUpperCase();
-
   const src = lookupCentroid(srcCode) || jitterHub("SRC|" + srcCode);
   const dst = (dstCode !== "GLOBAL" && lookupCentroid(dstCode)) || jitterHub(`HUB|${srcCode}|${ts}`);
 
-  // Push a simple A→B arc (no growth animation yet)
+  const initialT = 0.02;
+  const intensity = Number(evt.intensity_index || 1);
+
   arcs.push({
     sourcePosition: [src[0], src[1]],
-    targetPosition: [dst[0], dst[1]],
+    finalTarget: [dst[0], dst[1]],
     color: nextColor(),
-    width: widthFromIntensity(evt.intensity_index),
-    age: 0
+    width: widthFromIntensity(intensity),
+    _born: performance.now(),
+    progress: initialT,
+    alpha: 1,
+    maxAltMeters: 3 * (MAX_ALT_KM_BASE + MAX_ALT_KM_PER_INTENSITY * intensity) * 1000
   });
+
+
   if (arcs.length > MAX_ARCS) arcs.splice(0, arcs.length - MAX_ARCS);
 
-  // Live infographic window
   windowEvents.push({
     ts,
     country: srcCode || "??",
@@ -371,7 +433,6 @@ function handleSSEEvent(evt) {
 }
 
 
-// --- centroid + fallback helpers ---
 function centroidFor(code) {
   if (!code) return null;
   const c = String(code).toUpperCase();
@@ -385,20 +446,16 @@ function hashStr(s) {
   return Math.abs(h);
 }
 
-// Spread points around a hub so they don't overlap; returns [lng, lat]
 function hubJitter(seed) {
-  // ring around (0,0): radius 10–22 degrees, deterministic by seed
   const r = 10 + (seed % 100) / 100 * 12;
   const ang = ((seed / 100) % 360) * (Math.PI / 180);
   return [r * Math.cos(ang), r * Math.sin(ang)];
 }
 
-// Resolve a destination: try centroid; if GLOBAL/unknown, jitter near hub
 function resolveDestination(dstCode, ts, srcLngLat) {
   const c = (dstCode || '').toUpperCase();
   const cen = centroidFor(c);
   if (cen) return cen;
-  // GLOBAL or unknown → jitter near hub, seeded by src + ts so it's stable per flow
   const seed = hashStr(String(srcLngLat[0]) + ',' + String(srcLngLat[1]) + '|' + String(ts) + '|' + c);
   return hubJitter(seed);
 }
@@ -407,16 +464,16 @@ function resolveDestination(dstCode, ts, srcLngLat) {
 /* ===================== Robust SSE Connector (local + Vercel) ===================== */
 
 const candidates = [
-  "/api/events",                      // vercel dev + prod (same-origin)
-  "http://localhost:3000/api/events", // explicit local fallback
-  "http://localhost:3000/events",     // legacy local Express
-  "http://localhost:3000/stream"      // legacy local Express
+  "/api/events",                     
+  "http://localhost:3000/api/events", 
+  "http://localhost:3000/events",   
+  "http://localhost:3000/stream"      
 ];
 
 let es = globalThis.__ddos_es;
 
 async function connectSSE() {
-  if (es && es.readyState !== 2 /* CLOSED */) {
+  if (es && es.readyState !== 2) {
     try { es.close(); } catch {}
   }
   es = null;
@@ -426,14 +483,12 @@ async function connectSSE() {
       console.log("SSE: trying", url);
       const source = new EventSource(url, { withCredentials: false });
 
-      // Wait until it opens (4s timeout)
       await new Promise((resolve, reject) => {
         const t = setTimeout(() => reject(new Error("open timeout")), 4000);
         source.onopen = () => { clearTimeout(t); resolve(); };
-        source.onerror = () => {}; // let timeout decide
+        source.onerror = () => {}; 
       });
 
-      // Keep this one
       es = source;
       globalThis.__ddos_es = es;
 
@@ -447,7 +502,6 @@ async function connectSSE() {
         try {
           const msg = JSON.parse(e.data);
 
-          // If we got a valid message, we're definitely live
           const statusEl = document.getElementById("status");
           if (statusEl && statusEl.textContent !== "Live data connected") {
             statusEl.textContent = "Live data connected";
@@ -467,7 +521,7 @@ async function connectSSE() {
         setTimeout(connectSSE, 2000);
       };
 
-      return; // stop after first working URL
+      return; 
     } catch (err) {
       console.warn("SSE connect failed for", url, err?.message || err);
     }
@@ -478,7 +532,6 @@ async function connectSSE() {
   setTimeout(connectSSE, 3000);
 }
 
-// HMR cleanup (safe on Vercel)
 if (import.meta.hot) {
   import.meta.hot.accept();
   import.meta.hot.dispose(() => {
