@@ -1,8 +1,9 @@
 {
-  "name": "ddos-map-backend",
+  "name": "ddos-map-frontend",
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
+  "type": "module",
   "scripts": {
     "start": "node server.js",
     "dev": "vite",
@@ -12,12 +13,11 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "type": "module",
   "dependencies": {
     "cors": "^2.8.5",
+    "deck.gl": "^9.0.0",
     "dotenv": "^17.2.1",
     "express": "^4.19.2",
-    "deck.gl": "^9.0.0",
     "three": "^0.160.0"
   },
   "devDependencies": {
