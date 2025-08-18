@@ -1,31 +1,14 @@
 {
   "version": 2,
+  "devCommand": "npm --prefix frontend run build && npm --prefix frontend run preview -- --port $PORT",
   "builds": [
-    {
-      "src": "frontend/vite.config.js",
-      "use": "@vercel/static-build",
-      "config": {
-        "distDir": "dist"
-      }
-    },
-    {
-      "src": "frontend/api/**/*.js",
-      "use": "@vercel/node"
-    }
+    { "src": "frontend/vite.config.js", "use": "@vercel/static-build", "config": { "distDir": "dist" } }
   ],
+  "functions": {
+    "frontend/api/**/*.js": { "runtime": "edge" }
+  },
   "routes": [
-    {
-      "src": "/api/(.*)",
-      "dest": "frontend/api/$1.js"
-    },
-    {
-      "src": "/(.*)",
-      "dest": "frontend/dist/$1"
-    }
-  ],
-  "scripts": {
-  "dev": "vite",
-  "build": "vite build",
-  "preview": "vite preview"
-  }
+    { "src": "^/api/(.*)", "dest": "frontend/api/$1.js" },
+    { "src": "/(.*)", "dest": "frontend/dist/$1" }
+  ]
 }
