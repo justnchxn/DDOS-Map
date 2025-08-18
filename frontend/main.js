@@ -263,20 +263,19 @@ function updateInfographic() {
 
 /* ===================== Robust SSE Connector (local + Vercel) ===================== */
 
-// Decide endpoints based on where we are
-const isLocal = location.hostname === "localhost" || location.hostname === "127.0.0.1";
+// Try these in order (works for vercel dev, vercel prod, and legacy local Express)
 const candidates = [
-  "/api/events",          
+  "/api/events",
   "http://localhost:3000/api/events",
-  "http://localhost:3000/events",    
-  "http://localhost:3000/stream"   
+  "http://localhost:3000/events",
+  "http://localhost:3000/stream"
 ];
 
-// Singleton across hot reloads (harmless on Vercel)
+// Singleton across hot reloads
 let es = globalThis.__ddos_es;
 
 async function connectSSE() {
-  // Close any previous instance
+  // close any previous instance
   if (es && es.readyState !== 2 /* CLOSED */) {
     try { es.close(); } catch {}
   }
@@ -284,23 +283,19 @@ async function connectSSE() {
 
   for (const url of candidates) {
     try {
-      // Instead of hardcoding http://localhost:3000/api/events
-      const es = new EventSource("/api/events");
+      const es = new EventSource("/api/events");;
 
-      es.onopen = () => {
-        console.log("✅ SSE connected");
-        const statusEl = document.getElementById("status");
-        if (statusEl) statusEl.textContent = "Live data connected";
-      };
+      // wait until it actually opens (4s timeout)
+      await new Promise((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error("open timeout")), 4000);
+        source.onopen = () => { clearTimeout(t); resolve(); };
+        source.onerror = () => { /* let timeout decide */ };
+      });
 
-      es.onerror = (err) => {
-        console.error("❌ SSE error:", err);
-      };
-
-      es = test;
+      // success: keep this connection
+      es = source;
       globalThis.__ddos_es = es;
 
-      // ---- handlers ----
       es.onopen = () => {
         console.log("SSE open:", url);
         const statusEl = document.getElementById("status");
@@ -339,16 +334,18 @@ async function connectSSE() {
         console.warn("SSE error on", url, e);
         const statusEl = document.getElementById("status");
         if (statusEl) statusEl.textContent = "Reconnecting…";
+        try { es.close(); } catch {}
         setTimeout(connectSSE, 2000);
       };
 
-      return; // stop after the first working URL
+      return; // stop after first working URL
     } catch (err) {
-      console.warn("SSE connect failed for", url, err.message);
+      console.warn("SSE connect failed for", url, err?.message || err);
+      // try next candidate
     }
   }
 
-  // All candidates failed; show status & retry
+  // all candidates failed; retry
   const statusEl = document.getElementById("status");
   if (statusEl) statusEl.textContent = "Unable to connect (retrying)…";
   setTimeout(connectSSE, 3000);
@@ -363,5 +360,5 @@ if (import.meta.hot) {
   });
 }
 
-// Kick it off
+// Start it
 connectSSE();
